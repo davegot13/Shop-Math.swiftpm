@@ -1,22 +1,39 @@
+// Components.swift
+//
+// Building blocks shared by every tab: the settings keys, kerf parsing, the entry rows
+// (MeasureField and NumberField, both laid out by FieldRow), the result views (BigResult,
+// ResultRow, Callout), the Settings sheet, and the toolbar modifier that adds the in/mm toggle and
+// the settings gear. The screens in Views/ are built from these so every tab looks and behaves
+// the same.
+//
+// Length entries are stored as the text the user typed, in the current unit system, and turned
+// into inches with UnitSystem.inches (Core/Units.swift) whenever a value is needed.
+
 import SwiftUI
 import UIKit
 
 // MARK: - Shared settings
 
+/// UserDefaults keys for settings that more than one screen reads. The kerf key comes from
+/// LengthField, so switching units converts the stored kerf along with every other length entry.
 enum Keys {
     static let kerf = LengthField.kerf.key
+    /// Fraction denominator for imperial results: 8, 16, 32, or 64.
     static let precision = "settings_precision"
     static let tilt = "settings_tilt"
     static let units = UnitSwitcher.unitKey
 }
 
 /// Parses a stored kerf entry to inches, falling back to 1/8" if it can't be used.
+/// Usable means it parses in the current unit system and is at least 0 and under 1".
 func kerfValue(_ text: String, unit: UnitSystem) -> Double {
     if let v = unit.inches(text), v >= 0, v < 1 { return v }
     return 0.125
 }
 
 /// Shown under a kerf field when the entry can't be used.
+/// It uses the same test as kerfValue, so it appears exactly when the 1/8" fallback is in effect,
+/// and draws nothing otherwise.
 struct KerfWarning: View {
     let text: String
     @AppStorage(Keys.units) private var unit: UnitSystem = .imperial
@@ -35,6 +52,8 @@ struct KerfWarning: View {
 // MARK: - Input
 
 /// A length field that accepts fractions, feet and inches, metric units, and simple math.
+/// It binds to the raw text; callers parse it with unit.inches(text). Under the field it shows how
+/// the entry was read, in both units, so the user can catch a misread before using the result.
 struct MeasureField: View {
     let label: String
     @Binding var text: String
@@ -42,6 +61,7 @@ struct MeasureField: View {
     @AppStorage(Keys.units) private var unit: UnitSystem = .imperial
 
     /// A read-back of the entry in both units, a gray prompt when empty, or a red error.
+    /// The Bool is true for the error.
     private var status: (String, Bool) {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return ("Enter a value", false) }
@@ -57,6 +77,8 @@ struct MeasureField: View {
     var body: some View {
         FieldRow(label: label, caption: caption, status: status.0, statusIsError: status.1,
                  suffix: unit == .metric ? "mm" : "") {
+            // Entries mix digits with / ' " ( ) and unit words like mm or ft, so use the
+            // punctuation keyboard and keep autocorrect and capitalization from changing them.
             TextField("0", text: $text)
                 .keyboardType(.numbersAndPunctuation)
                 .multilineTextAlignment(.trailing)
@@ -68,6 +90,7 @@ struct MeasureField: View {
 }
 
 /// A plain number field (degrees, percent, dollars).
+/// Callers parse the text with number(_:). There is no unit conversion and no math.
 struct NumberField: View {
     let label: String
     @Binding var text: String
@@ -75,6 +98,8 @@ struct NumberField: View {
     var suffix: String = ""
     var caption: String? = nil
 
+    /// A gray prompt when empty, a red error when the text isn't a number, and nil (no note)
+    /// when it is valid. The prefix or suffix already says what the number means.
     private var status: (String, Bool)? {
         if text.trimmingCharacters(in: .whitespaces).isEmpty { return ("Enter a number", false) }
         return number(text) == nil ? ("Enter a number", true) : nil
@@ -91,25 +116,38 @@ struct NumberField: View {
     }
 }
 
-/// Shared layout for entry rows. The label and a filled entry box share the top line; the
-/// caption sits below at full width and wraps, with the read-back under the entry on the right.
+/// Shared layout for entry rows (MeasureField, NumberField).
+///
+/// The label and a filled entry box share the top line. The caption and the read-back sit on
+/// their own line below at full width, caption on the left and read-back on the right. Captions
+/// used to sit beside the field, where they were truncated on narrow screens; below the row they
+/// get the whole width and can wrap.
+///
 /// Tapping the label, the gap, or the caption starts editing; the entry box keeps its own
-/// text gestures (caret placement, double-tap selection, the loupe) untouched. At accessibility text sizes the entry box drops
-/// below its label so long values never clip.
+/// text gestures (caret placement, double tap selection, the loupe) untouched. At accessibility
+/// text sizes the entry box drops below its label so long values never clip.
 struct FieldRow<Field: View>: View {
     let label: String
     let caption: String?
+    /// Read-back or error text shown under the entry box. nil hides it.
     let status: String?
+    /// Shows `status` in red instead of gray.
     let statusIsError: Bool
+    /// Text beside the entry box, such as "$" before it or "%", "°", or "mm" after it.
     var prefix: String = ""
     let suffix: String
     @ViewBuilder let field: () -> Field
 
+    /// Bound to the text field so taps elsewhere in the row can focus it.
     @FocusState private var focused: Bool
+    /// Narrowest the entry box gets. Scales with Dynamic Type so a larger font still fits a value.
     @ScaledMetric(relativeTo: .body) private var minFieldWidth: CGFloat = 90
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
+        // At accessibility sizes the label and box don't fit side by side, so stack them.
+        // AnyLayout swaps the container without changing the children's identity, so the text
+        // field keeps its focus and state when the text size changes.
         let stacked = typeSize.isAccessibilitySize
         let top = stacked
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
@@ -117,10 +155,17 @@ struct FieldRow<Field: View>: View {
 
         VStack(alignment: .leading, spacing: 4) {
             top {
+                // The tap to focus gestures sit on the label, the spacer, and the notes, never on
+                // the text field or a parent of it. A parent tap gesture competes with the field's
+                // own gestures and can break caret dragging and double tap selection.
+                // contentShape makes each whole frame tappable, including the spacer's empty area.
+                // The label's layout priority makes the entry box give up width first, down to
+                // minFieldWidth, before the label truncates.
                 Text(label)
                     .layoutPriority(1)
                     .contentShape(Rectangle())
                     .onTapGesture { focused = true }
+                // In the stacked layout a Spacer would only add vertical space, so leave it out.
                 if !stacked {
                     Spacer(minLength: 8)
                         .contentShape(Rectangle())
@@ -135,11 +180,14 @@ struct FieldRow<Field: View>: View {
         .padding(.vertical, 2)
     }
 
+    /// The entry box: optional prefix, the field on a filled rounded rectangle, optional suffix.
     private var entry: some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             if !prefix.isEmpty {
                 Text(prefix).foregroundStyle(.secondary)
             }
+            // The visible label and caption are separate views, so pass them to VoiceOver here.
+            // A TextField takes all the width it's offered; maxWidth keeps it a compact box.
             field()
                 .focused($focused)
                 .accessibilityLabel(label)
@@ -156,6 +204,10 @@ struct FieldRow<Field: View>: View {
 
     /// Caption and read-back on one line when they fit, otherwise caption first (wrapping)
     /// and the read-back on its own line at the right.
+    ///
+    /// ViewThatFits measures each option at its ideal width and uses the first that fits. The
+    /// one line option's ideal width includes the whole caption, so it is chosen only when the
+    /// caption fits without truncating; otherwise the wrapping option takes over.
     @ViewBuilder private var notes: some View {
         if caption != nil || status != nil {
             ViewThatFits(in: .horizontal) {
@@ -173,6 +225,8 @@ struct FieldRow<Field: View>: View {
         }
     }
 
+    /// The caption, kept to one line for the side by side option or allowed to wrap. When
+    /// wrapping, fixedSize lets it grow as tall as it needs inside a List row.
     @ViewBuilder private func captionText(wrapping: Bool) -> some View {
         if let caption {
             Text(caption)
@@ -183,6 +237,7 @@ struct FieldRow<Field: View>: View {
         }
     }
 
+    /// The read-back or error, right aligned, wrapping rather than truncating.
     @ViewBuilder private var statusText: some View {
         if let status {
             Text(status)
@@ -194,13 +249,17 @@ struct FieldRow<Field: View>: View {
     }
 }
 
+/// Parses a plain number entry (NumberField): no units and no math. See
+/// MeasureParser.plainNumber for the comma rules and what it rejects.
 func number(_ text: String) -> Double? {
-    Double(text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: "."))
+    MeasureParser.plainNumber(text)
 }
 
 // MARK: - Output
 
 /// The headline number on each screen, sized to read from across the bench.
+/// A long value shrinks to as little as half size to stay on one line. VoiceOver reads the title,
+/// value, and detail as one element.
 struct BigResult: View {
     let title: String
     let value: String
@@ -227,6 +286,7 @@ struct BigResult: View {
     }
 }
 
+/// A secondary result: label on the left, value on the right in monospaced digits.
 struct ResultRow: View {
     let label: String
     let value: String
@@ -240,6 +300,8 @@ struct ResultRow: View {
     }
 }
 
+/// An inline note with an icon: `.info` for tips and fence moves, `.warning` for bad inputs and
+/// safety notes.
 struct Callout: View {
     enum Kind { case info, warning }
     let kind: Kind
@@ -257,6 +319,8 @@ struct Callout: View {
 
 // MARK: - Settings
 
+/// The sheet behind the gear button: units and fraction precision, blade kerf and tilt, and help
+/// for typing measurements. Every value lives in @AppStorage, so the tabs pick up changes at once.
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(Keys.kerf) private var kerf = LengthField.kerf.imperialDefault
@@ -264,6 +328,8 @@ struct SettingsView: View {
     @AppStorage(Keys.tilt) private var tilt: BladeTilt = .awayFromFence
     @AppStorage(Keys.units) private var unit: UnitSystem = .imperial
 
+    /// Routes the Units picker through UnitSwitcher so a switch also converts every stored length
+    /// entry. Writing the unit key directly would leave "5 1/2" to be read as 5.5 mm.
     private var unitBinding: Binding<UnitSystem> {
         Binding(get: { unit }, set: { UnitSwitcher.switchTo($0) })
     }
@@ -276,6 +342,7 @@ struct SettingsView: View {
                         ForEach(UnitSystem.allCases) { Text($0.name).tag($0) }
                     }
                     .pickerStyle(.segmented)
+                    // Metric results always show to 0.1 mm, so precision only matters for fractions.
                     if unit == .imperial {
                         PrecisionPicker(precision: $precision)
                     }
@@ -322,6 +389,8 @@ struct SettingsView: View {
     }
 }
 
+/// Picks the fraction denominator that imperial results round to. The tags are the denominators.
+/// Used in Settings and on the Fractions tab.
 struct PrecisionPicker: View {
     @Binding var precision: Int
 
@@ -337,9 +406,13 @@ struct PrecisionPicker: View {
 }
 
 /// Adds the in/mm toggle and the settings gear to a screen's toolbar.
+/// Apply it with .settingsButton().
 struct SettingsButton: ViewModifier {
+    /// The Fractions tab passes false. Its calculator has no units, so the toggle would change
+    /// nothing on that screen while it converted the stored entries on the other tabs.
     var showsUnits = true
     @State private var showing = false
+    /// Drives the toggle's label. The tap handler reads the stored value instead (see unitButton).
     @AppStorage(Keys.units) private var unit: UnitSystem = .imperial
 
     func body(content: Content) -> some View {
@@ -365,6 +438,10 @@ struct SettingsButton: ViewModifier {
 
     private var unitButton: some View {
         Button {
+            // Read the unit from UserDefaults, not this view's @AppStorage copy. switchTo converts
+            // from the stored unit and does nothing when the target matches it. The copy can lag a
+            // view update behind the store, and if it were stale its `other` would equal the stored
+            // unit, so the tap would do nothing.
             UnitSwitcher.switchTo(UnitSwitcher.current().other)
         } label: {
             Text(unit.symbol)
@@ -378,6 +455,7 @@ struct SettingsButton: ViewModifier {
 }
 
 extension View {
+    /// Adds the settings gear, and the in/mm toggle unless `showsUnits` is false.
     func settingsButton(showsUnits: Bool = true) -> some View {
         modifier(SettingsButton(showsUnits: showsUnits))
     }
